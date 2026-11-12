@@ -2,13 +2,21 @@ r""" Few-shot landslide episode dataset (RGB + DTM).
 
 Layout expected under ``data_dir``::
 
-    <data_dir>/<split>/image/<name>.png
-    <data_dir>/<split>/dtm/<name>.tif
-    <data_dir>/<split>/label/<name>.png
+    <data_dir>/<split>/<IMAGE>/<name>.png
+    <data_dir>/<split>/<DTM>/<name>.tif
+    <data_dir>/<split>/<LABEL>/<name>.png
+
+Folder names are resolved case-insensitively and by alias, so both of these work::
+
+    image / dtm / label
+    IMAGE / DTM_NORM / LABEL
+
+(file stems are also matched case-insensitively, e.g. ``Chainage_1_00026`` vs
+``CHAINAGE_1_00026``.)
 
 Alternatively ``data_dir`` may point straight at a single split folder (one that
-already contains ``image/``, ``dtm/`` and ``label/``); both train and val (and
-test) paths can therefore live in separate locations on disk.
+already contains the modality folders); both train and val (and test) paths can
+therefore live in separate locations on disk.
 
 Only landslide-positive tiles (label has at least one foreground pixel) are used
 for both query and support, per the project setting. Preprocessing mirrors the
@@ -43,6 +51,11 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 DTM_MEAN = [0.5, 0.5, 0.5]
 DTM_STD = [0.5, 0.5, 0.5]
+
+
+def _norm_key(name: str) -> str:
+    """Lower-case + strip non-alphanumerics: DTM_NORM == dtm-norm == dtmnorm."""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
 def load_blacklist(blacklist_path: Optional[str]) -> set:
@@ -84,7 +97,9 @@ def load_blacklist(blacklist_path: Optional[str]) -> set:
                 continue
             stem, _ = os.path.splitext(os.path.basename(clean))
             blacklist.add(stem)
+            blacklist.add(stem.lower())
             blacklist.add(clean)
+            blacklist.add(clean.lower())
     return blacklist
 
 
@@ -145,30 +160,38 @@ class LandslideFSS(Dataset):
         if not os.path.isdir(self.split_dir):
             raise FileNotFoundError(f"Split directory not found: data_dir='{data_dir}', split='{split}'")
 
-        self.image_dir = os.path.join(self.split_dir, "image")
-        self.dtm_dir = os.path.join(self.split_dir, "dtm")
-        self.label_dir = os.path.join(self.split_dir, "label")
-        for d in (self.image_dir, self.dtm_dir, self.label_dir):
-            if not os.path.isdir(d):
-                raise FileNotFoundError(f"Required modality directory missing: {d}")
+        self.image_dir = self._resolve_subdir(self.split_dir, ("image", "images", "rgb"))
+        self.dtm_dir = self._resolve_subdir(self.split_dir, ("dtm_norm", "dtm", "dtmnormalized", "dem", "dsm"))
+        self.label_dir = self._resolve_subdir(self.split_dir, ("label", "labels", "mask", "masks", "gt"))
+
+        missing = [n for n, d in (("image", self.image_dir), ("dtm", self.dtm_dir), ("label", self.label_dir)) if d is None]
+        if missing:
+            found = sorted(d for d in os.listdir(self.split_dir) if os.path.isdir(os.path.join(self.split_dir, d)))
+            raise FileNotFoundError(
+                f"Required modality dir(s) missing under '{self.split_dir}': {missing}. "
+                f"Expected e.g. IMAGE / DTM_NORM / LABEL. Found dirs: {found}"
+            )
+
+        # case-insensitive file lookup: normalized stem -> actual filename
+        self._image_files = self._index_files(self.image_dir, (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"))
+        self._dtm_files = self._index_files(self.dtm_dir, (".tif", ".tiff", ".png", ".bmp"))
+        self._label_files = self._index_files(self.label_dir, (".png", ".tif", ".tiff", ".bmp"))
 
         self.blacklist = load_blacklist(blacklist_path)
 
-        all_files = sorted(os.listdir(self.image_dir))
         skipped_blacklist = 0
         self.samples = []
         self.pos_samples = []
-        for f in all_files:
-            base_name, _ = os.path.splitext(f)
-            if base_name in self.blacklist or f in self.blacklist:
+        for key, f in sorted(self._image_files.items()):
+            if key in self.blacklist:
                 skipped_blacklist += 1
                 continue
-            label_path = self._label_path(base_name)
+            label_path = self._label_path(f)
             if label_path is None:
                 continue
             if self._count_foreground(label_path) >= self.min_foreground:
-                self.pos_samples.append(base_name)
-            self.samples.append(base_name)
+                self.pos_samples.append(f)
+            self.samples.append(f)
 
         if skipped_blacklist > 0:
             print(f"[{split.upper()}] Blacklist active: {skipped_blacklist} broken samples skipped.")
@@ -184,26 +207,42 @@ class LandslideFSS(Dataset):
         self.episodes_per_epoch = int(episodes_per_epoch) if episodes_per_epoch else len(self.pos_samples)
 
     # ------------------------------------------------------------------ paths
-    def _label_path(self, name: str) -> Optional[str]:
-        for ext in (".png", ".tif", ".tiff"):
-            p = os.path.join(self.label_dir, name + ext)
-            if os.path.exists(p):
-                return p
+    @staticmethod
+    def _resolve_subdir(parent: str, candidates) -> Optional[str]:
+        """Find a modality subfolder by exact/case-insensitive/normalized name."""
+        entries = [d for d in os.listdir(parent) if os.path.isdir(os.path.join(parent, d))]
+        by_lower = {d.lower(): d for d in entries}
+        for cand in candidates:
+            if cand in by_lower:
+                return os.path.join(parent, by_lower[cand])
+        cand_norm = {_norm_key(c) for c in candidates}
+        for d in entries:
+            if _norm_key(d) in cand_norm:
+                return os.path.join(parent, d)
         return None
+
+    @staticmethod
+    def _index_files(directory: str, exts) -> dict:
+        """Map normalized stems -> actual filename (case-insensitive lookup)."""
+        exts = tuple(e.lower() for e in exts)
+        index = {}
+        for f in os.listdir(directory):
+            stem, ext = os.path.splitext(f)
+            if ext.lower() in exts:
+                index.setdefault(_norm_key(stem), f)
+        return index
+
+    def _label_path(self, name: str) -> Optional[str]:
+        f = self._label_files.get(_norm_key(os.path.splitext(os.path.basename(name))[0]))
+        return os.path.join(self.label_dir, f) if f else None
 
     def _image_path(self, name: str) -> Optional[str]:
-        for ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
-            p = os.path.join(self.image_dir, name + ext)
-            if os.path.exists(p):
-                return p
-        return None
+        f = self._image_files.get(_norm_key(os.path.splitext(os.path.basename(name))[0]))
+        return os.path.join(self.image_dir, f) if f else None
 
     def _dtm_path(self, name: str) -> Optional[str]:
-        for ext in (".tif", ".tiff", ".png"):
-            p = os.path.join(self.dtm_dir, name + ext)
-            if os.path.exists(p):
-                return p
-        return None
+        f = self._dtm_files.get(_norm_key(os.path.splitext(os.path.basename(name))[0]))
+        return os.path.join(self.dtm_dir, f) if f else None
 
     @staticmethod
     def _count_foreground(label_path: str) -> int:
