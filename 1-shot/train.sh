@@ -23,7 +23,7 @@ BLACKLIST="${BLACKLIST:-${BLACK_LIST_PATH:-}}"
 
 # ------------------------------- model -------------------------------------
 MODEL="${MODEL:-IFCNet}"
-BACKBONE="${BACKBONE:-resnet50}"
+BACKBONE="${BACKBONE:-sam2_hiera_l}"
 SIZE="${SIZE:-512}"
 DROP="${DROP:-0.2}"
 
@@ -37,7 +37,7 @@ SAM2_CKPT="${SAM2_CKPT:-$HIERA_PATH}"   # e.g. /content/.../sam2_hiera_large.pt 
 SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"  # 1 = train wide adapters, 0 = freeze trunk fully
 
 # ------------------------------- optim -------------------------------------
-BSZ="${BSZ:-4}"
+BSZ="${BSZ:-16}"
 EPISODES="${EPISODES:-0}"        # query episodes per epoch (0 = all positive tiles; must be 0 or >= BSZ)
 LR="${LR:-3e-4}"                 # frozen backbone -> >=3e-4 recommended
 EPOCH="${EPOCH:-200}"

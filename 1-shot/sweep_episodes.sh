@@ -17,7 +17,7 @@ EPISODES_LIST="${EPISODES_LIST:-0 10 100}"
 # Epochs per run (keep small for a quick comparison).
 EPOCH="${EPOCH:-20}"
 # Batch size used for every run.
-BSZ="${BSZ:-4}"
+BSZ="${BSZ:-16}"
 LR="${LR:-3e-4}"
 LOSS="${LOSS:-tversky}"
 
