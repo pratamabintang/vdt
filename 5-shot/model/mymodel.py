@@ -52,14 +52,14 @@ class IFCNet(nn.Module):
 
         # self.corr_mid = corr_mid*3 if len(corr_mid)==1 else corr_mid # correspond to l2,l3,l4
 
-        self.multi_smi_fuse = nn.ModuleList([ConvModule(self.nbottlenecks[i]*3,self.nbottlenecks[i],1) 
+        self.multi_smi_fuse = nn.ModuleList([ConvModule(self.nbottlenecks[i]*2,self.nbottlenecks[i],1) 
                                              for i in range(len(self.nbottlenecks))]) # correspond to l2,l3,l4
         
 
         self.tri_mid_ch=128
         self.tri_out_ch=64
-        self.TriFusel4 = TriCorr_v2_6(in_ch=self.multilevel_ch[-1],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
-        self.TriFusel3 = TriCorr_v2_6(in_ch=self.multilevel_ch[-2],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
+        self.TriFusel4 = BiCorr_v1(in_ch=self.multilevel_ch[-1],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
+        self.TriFusel3 = BiCorr_v1(in_ch=self.multilevel_ch[-2],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
         #self.TriFusel2 = TriCorr_v2_3(in_ch=self.multilevel_ch[-1],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=0.2)
 
         self.Fusion = ConvModule(self.tri_out_ch+self.nbottlenecks[-1],self.tri_mid_ch,1)
@@ -80,7 +80,7 @@ class IFCNet(nn.Module):
 
         return src
 
-    def forward(self, query_img, query_img_th, query_img_d,  support_img, support_img_th, support_img_d, support_mask):
+    def forward(self, query_img, query_img_th, support_img, support_img_th, support_mask):
         with torch.no_grad():
             # only the output of last layer in each level is used
             query_feats = self.extract_feats(query_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
@@ -91,10 +91,6 @@ class IFCNet(nn.Module):
             support_feats_th = self.extract_feats(support_img_th, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
             support_feats_th = self.mask_feature(support_feats_th, support_mask.clone())
 
-            query_feats_d = self.extract_feats(query_img_d, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
-            support_feats_d = self.extract_feats(support_img_d, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
-            support_feats_d = self.mask_feature(support_feats_d, support_mask.clone())
-
         ### Here all support feats are masked
         
         
@@ -104,46 +100,39 @@ class IFCNet(nn.Module):
         support_feats = [support_feats[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
         query_feats_th = [query_feats_th[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
         support_feats_th = [support_feats_th[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
-        query_feats_d = [query_feats_d[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
-        support_feats_d = [support_feats_d[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
         
         multi_sim = []
         if self.vis:
             vsim_maps = []
-            dsim_maps = []
             tsim_maps = []
-        for idx,(qv_layer,sv_layer,qd_layer,sd_layer,qt_layer,st_layer) in enumerate(zip(query_feats,support_feats,query_feats_d,
-                                                 support_feats_d,query_feats_th,support_feats_th)):
+        for idx,(qv_layer,sv_layer,qt_layer,st_layer) in enumerate(zip(query_feats,support_feats,query_feats_th,support_feats_th)):
             # 3 levels in total
             vsim = []
-            dsim = []
             tsim = []
-            for iidx, (qv,sv,qd,sd,qt,st) in enumerate(zip(qv_layer,sv_layer,qd_layer,sd_layer,qt_layer,st_layer)):             
+            for iidx, (qv,sv,qt,st) in enumerate(zip(qv_layer,sv_layer,qt_layer,st_layer)):             
                 vsim.append(Correlation.multi_similarity(qv,sv))
-                dsim.append(Correlation.multi_similarity(qd,sd))
                 tsim.append(Correlation.multi_similarity(qt,st))
                 
-            trisim = self.multi_smi_fuse[idx](torch.cat(vsim+dsim+tsim,dim=1))
+            trisim = self.multi_smi_fuse[idx](torch.cat(vsim+tsim,dim=1))
             multi_sim.append(trisim)
             if self.vis:
                 vsim_maps.append(vsim)
-                dsim_maps.append(dsim)
                 tsim_maps.append(tsim)
             
         
         # multi_sim ->[l2,l3,l4] each level is (bsz,1,qH,qW)
              
-        ############## D is assigned as main modality #############
-        Trimap_l4 = self.TriFusel4([query_feats_d[-1][-1],query_feats[-1][-1],query_feats_th[-1][-1]],
-                                 [support_feats_d[-1][-1],support_feats[-1][-1],support_feats_th[-1][-1]]) # features = [fV,fD,fT]
+        ############## RGB is assigned as main modality, thermal as aux #############
+        Trimap_l4 = self.TriFusel4([query_feats[-1][-1],query_feats_th[-1][-1]],
+                                 [support_feats[-1][-1],support_feats_th[-1][-1]]) # features = [fV,fT]
         Trimap_l4 = torch.cat(Trimap_l4,dim=1)
-        if(self.vis):vis_l4 = [query_feats[-1][-1],query_feats_d[-1][-1],query_feats_th[-1][-1],Trimap_l4]
+        if(self.vis):vis_l4 = [query_feats[-1][-1],query_feats_th[-1][-1],Trimap_l4]
 
 
-        Trimap_l3 = self.TriFusel3([query_feats_d[-2][-1],query_feats[-2][-1],query_feats_th[-2][-1]],
-                                 [support_feats_d[-2][-1],support_feats[-2][-1],support_feats_th[-2][-1]])
+        Trimap_l3 = self.TriFusel3([query_feats[-2][-1],query_feats_th[-2][-1]],
+                                 [support_feats[-2][-1],support_feats_th[-2][-1]])
         Trimap_l3 = torch.cat(Trimap_l3,dim=1)
-        if(self.vis):vis_l3 = [query_feats[-2][-1],query_feats_d[-2][-1],query_feats_th[-2][-1],Trimap_l3]
+        if(self.vis):vis_l3 = [query_feats[-2][-1],query_feats_th[-2][-1],Trimap_l3]
 
         logit_masks=[]
 
@@ -164,7 +153,7 @@ class IFCNet(nn.Module):
                 
         # decoder output 2 channel: indicate probabilities of foreground and background
         if self.vis:
-            return logit_masks,vsim_maps,dsim_maps,tsim_maps,multi_sim,vis_l3,vis_l4
+            return logit_masks,vsim_maps,tsim_maps,multi_sim,vis_l3,vis_l4
         else:
             return logit_masks
 
@@ -180,7 +169,7 @@ class IFCNet(nn.Module):
         logit_mask_agg = 0
         for s_idx in range(nshot):
             # inferencing should do nshot times for each support image
-            logit_mask = self(batch['query_img'], batch['support_imgs'][:, s_idx], batch['support_masks'][:, s_idx])
+            logit_mask = self(batch['query_img'], batch['query_img_th'], batch['support_imgs'][:, s_idx], batch['support_imgs_th'][:, s_idx], batch['support_masks'][:, s_idx])
 
             if self.use_original_imgsize:
                 org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), batch['org_query_imsize'][0].item()])
@@ -267,14 +256,14 @@ class IFCNet_5shot(nn.Module):
 
         # self.corr_mid = corr_mid*3 if len(corr_mid)==1 else corr_mid # correspond to l2,l3,l4
 
-        self.multi_smi_fuse = nn.ModuleList([ConvModule(self.nbottlenecks[i]*3,self.nbottlenecks[i],1) 
+        self.multi_smi_fuse = nn.ModuleList([ConvModule(self.nbottlenecks[i]*2,self.nbottlenecks[i],1) 
                                              for i in range(len(self.nbottlenecks))]) # correspond to l2,l3,l4
         
 
         self.tri_mid_ch=128
         self.tri_out_ch=64
-        self.TriFusel4 = TriCorr_v2_6(in_ch=self.multilevel_ch[-1],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
-        self.TriFusel3 = TriCorr_v2_6(in_ch=self.multilevel_ch[-2],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
+        self.TriFusel4 = BiCorr_v1(in_ch=self.multilevel_ch[-1],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
+        self.TriFusel3 = BiCorr_v1(in_ch=self.multilevel_ch[-2],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
         #self.TriFusel2 = TriCorr_v2_6(in_ch=self.multilevel_ch[-3],mid_ch=self.tri_mid_ch,out_ch=self.tri_out_ch,dropout=dropout)
 
         self.Fusion = ConvModule(self.tri_out_ch+self.nbottlenecks[-1],self.tri_mid_ch,1)
@@ -293,7 +282,7 @@ class IFCNet_5shot(nn.Module):
 
         return src
 
-    def forward(self, query_img, query_img_th, query_img_d,  support_imgs, support_img_ths, support_img_ds, support_masks):
+    def forward(self, query_img, query_img_th, support_imgs, support_img_ths, support_masks):
         multi_sims = []
         Trimap_l3s = []
         Trimap_l4s = []
@@ -301,56 +290,47 @@ class IFCNet_5shot(nn.Module):
         with torch.no_grad():
             query_feats = self.extract_feats(query_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
             query_feats_th = self.extract_feats(query_img_th, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
-            query_feats_d = self.extract_feats(query_img_d, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
         query_feats = [query_feats[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
         query_feats_th = [query_feats_th[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
-        query_feats_d = [query_feats_d[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
 
         for i in range(self.shot):
             support_img = support_imgs[:, i, :, :, :]
             support_img_th = support_img_ths[:, i, :, :, :]
-            support_img_d = support_img_ds[:, i, :, :, :]
             support_mask = support_masks[:, i, :, :]
 
             with torch.no_grad():
                 support_feats = self.extract_feats(support_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
                 support_feats_th = self.extract_feats(support_img_th, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
-                support_feats_d = self.extract_feats(support_img_d, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
 
                 support_feats = self.mask_feature(support_feats, support_mask.clone())
                 support_feats_th = self.mask_feature(support_feats_th, support_mask.clone())
-                support_feats_d = self.mask_feature(support_feats_d, support_mask.clone())
 
 
          # pick l2, l3, l4
             support_feats = [support_feats[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
             support_feats_th = [support_feats_th[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
-            support_feats_d = [support_feats_d[self.layer_ids[i]:self.layer_ids[i+1]] for i in range(0,len(self.layer_ids)-1)]
             
             multi_sim = []
-            for idx,(qv_layer,sv_layer,qd_layer,sd_layer,qt_layer,st_layer) in enumerate(zip(query_feats,support_feats,query_feats_d,
-                                                    support_feats_d,query_feats_th,support_feats_th)):
+            for idx,(qv_layer,sv_layer,qt_layer,st_layer) in enumerate(zip(query_feats,support_feats,query_feats_th,support_feats_th)):
                 # 3 levels in total
                 vsim = []
-                dsim = []
                 tsim = []
-                for iidx, (qv,sv,qd,sd,qt,st) in enumerate(zip(qv_layer,sv_layer,qd_layer,sd_layer,qt_layer,st_layer)):             
+                for iidx, (qv,sv,qt,st) in enumerate(zip(qv_layer,sv_layer,qt_layer,st_layer)):             
                     vsim.append(Correlation.multi_similarity(qv,sv))
-                    dsim.append(Correlation.multi_similarity(qd,sd))
                     tsim.append(Correlation.multi_similarity(qt,st))
-                trisim = self.multi_smi_fuse[idx](torch.cat(vsim+dsim+tsim,dim=1))
+                trisim = self.multi_smi_fuse[idx](torch.cat(vsim+tsim,dim=1))
                 multi_sim.append(trisim.unsqueeze(1))# multi_sim ->[l2,l3,l4] each level is (bsz,1,qH,qW)
             
             multi_sims.append(multi_sim)
                   
-            ################ D is main modality ############
-            Trimap_l4 = self.TriFusel4([query_feats_d[-1][-1],query_feats[-1][-1],query_feats_th[-1][-1]],
-                                    [support_feats_d[-1][-1],support_feats[-1][-1],support_feats_th[-1][-1]]) # features = [fV,fD,fT]
+            ################ RGB is main modality, thermal as aux ############
+            Trimap_l4 = self.TriFusel4([query_feats[-1][-1],query_feats_th[-1][-1]],
+                                    [support_feats[-1][-1],support_feats_th[-1][-1]]) # features = [fV,fT]
             Trimap_l4 = torch.cat(Trimap_l4,dim=1)
             Trimap_l4s.append(Trimap_l4.unsqueeze(1))
             
-            Trimap_l3 = self.TriFusel3([query_feats_d[-2][-1],query_feats[-2][-1],query_feats_th[-2][-1]],
-                                    [support_feats_d[-2][-1],support_feats[-2][-1],support_feats_th[-2][-1]])
+            Trimap_l3 = self.TriFusel3([query_feats[-2][-1],query_feats_th[-2][-1]],
+                                    [support_feats[-2][-1],support_feats_th[-2][-1]])
             Trimap_l3 = torch.cat(Trimap_l3,dim=1)
             Trimap_l3s.append(Trimap_l3.unsqueeze(1))
 
@@ -396,7 +376,7 @@ class IFCNet_5shot(nn.Module):
         logit_mask_agg = 0
         for s_idx in range(nshot):
             # inferencing should do nshot times for each support image
-            logit_mask = self(batch['query_img'], batch['support_imgs'][:, s_idx], batch['support_masks'][:, s_idx])
+            logit_mask = self(batch['query_img'], batch['query_img_th'], batch['support_imgs'][:, s_idx], batch['support_imgs_th'][:, s_idx], batch['support_masks'][:, s_idx])
 
             if self.use_original_imgsize:
                 org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), batch['org_query_imsize'][0].item()])

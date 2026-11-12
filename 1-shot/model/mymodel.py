@@ -9,8 +9,9 @@ from torchvision.models import resnet
 from torchvision.models import vgg
 
 from .Trifuse import *
-from .base.feature import extract_feat_vgg, extract_feat_res, extract_feat_res_layer
+from .base.feature import extract_feat_vgg, extract_feat_res
 from .base.correlation import Correlation
+from .losses import structure_loss
 
 import numpy as np
 
@@ -67,11 +68,9 @@ class IFCNet(nn.Module):
         self.deblock1 = ConvModule(self.tri_out_ch+self.tri_mid_ch+self.nbottlenecks[-2],self.tri_out_ch,1)
         self.deblock2 = ConvModule(self.tri_out_ch+self.nbottlenecks[-3],self.tri_out_ch,1)
 
-        self.cross_entropy_loss = nn.CrossEntropyLoss()
-        
-        self.side3 = ConvModule(self.tri_mid_ch,2,3,mode="relu")
-        self.side2 = ConvModule(self.tri_out_ch,2,3,mode="relu")
-        self.side1 = ConvModule(self.tri_out_ch,2,3,mode="relu")
+        self.side3 = ConvModule(self.tri_mid_ch,2,3,mode="conv")   # raw logits (no BN/ReLU)
+        self.side2 = ConvModule(self.tri_out_ch,2,3,mode="conv")
+        self.side1 = ConvModule(self.tri_out_ch,2,3,mode="conv")
         #self.side0 = ConvModule(2*3,2,1,mode="sigmoid")
 
         
@@ -160,52 +159,18 @@ class IFCNet(nn.Module):
             features[idx] = features[idx] * mask
         return features
 
-    def predict_mask_nshot(self, batch, nshot):
-
-        # Perform multiple prediction given (nshot) number of different support sets
-        logit_mask_agg = 0
-        for s_idx in range(nshot):
-            # inferencing should do nshot times for each support image
-            logit_mask = self(batch['query_img'], batch['query_img_th'], batch['support_imgs'][:, s_idx], batch['support_imgs_th'][:, s_idx], batch['support_masks'][:, s_idx])
-
-            if self.use_original_imgsize:
-                org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), batch['org_query_imsize'][0].item()])
-                logit_mask = F.interpolate(logit_mask, org_qry_imsize, mode='bilinear', align_corners=True)
-
-            logit_mask_agg += logit_mask.argmax(dim=1).clone()
-            # vote for background or target:
-            
-            if nshot == 1: return logit_mask_agg
-
-        # Average & quantize predictions given threshold (=0.5)
-        bsz = logit_mask_agg.size(0)
-        max_vote = logit_mask_agg.view(bsz, -1).max(dim=1)[0]
-        max_vote = torch.stack([max_vote, torch.ones_like(max_vote).long()])
-        # max_vote>=1
-        max_vote = max_vote.max(dim=0)[0].view(bsz, 1, 1)
-        pred_mask = logit_mask_agg.float() / max_vote
-        # channel-0 present background and channel-1 present target 
-        pred_mask[pred_mask < 0.5] = 0
-        pred_mask[pred_mask >= 0.5] = 1
-
-        return pred_mask
-
-    def compute_objective(self, logit_masks, gt_mask):
-        
+    def compute_objective(self, logit_masks, gt_mask, auxloss_weight=0.4):
+        # structure-aware loss: weighted BCE + weighted IoU on the foreground logits
+        # deep supervision: finest scale weight 1.0, auxiliary scales weight auxloss_weight
         if isinstance(logit_masks,list):
             loss = 0 
-            for logit_mask in logit_masks:
-                bsz = logit_mask.size(0)
-                logit_mask = logit_mask.view(bsz, 2, -1)  
-                gt_mask = gt_mask.view(bsz, -1).long()
-                loss = loss + self.cross_entropy_loss(logit_mask, gt_mask)
+            last = len(logit_masks) - 1
+            for i, logit_mask in enumerate(logit_masks):
+                w = 1.0 if i == last else auxloss_weight
+                loss = loss + w * structure_loss(logit_mask, gt_mask)
 
         else:      
-            logit_mask = logit_masks      
-            bsz = logit_mask.size(0)
-            logit_mask = logit_mask.view(bsz, 2, -1)  
-            gt_mask = gt_mask.view(bsz, -1).long()
-            loss = self.cross_entropy_loss(logit_mask, gt_mask)
+            loss = structure_loss(logit_masks, gt_mask)
 
         return loss
 

@@ -74,5 +74,50 @@ class TriCorr_v2_6(nn.Module):
         fused_Trimaps.append(self.V_corr(torch.cat([Q_en_V,S_en_V],dim=1)))  
 
         return fused_Trimaps
+
+
+class BiCorr_v1(nn.Module):
+    def __init__(self,in_ch, mid_ch = None, out_ch = None, dropout=0.5) -> None:
+        super().__init__()
+        # bimodal: RGB anchor (main) + thermal aux attention
+        # sim computed from RGB, thermal acts as attention query
+        self.in_ch = in_ch
+        if (mid_ch is None):
+            self.mid_ch = in_ch
+        else:
+            self.mid_ch = mid_ch
+
+        if (out_ch is None):
+            self.out_ch = mid_ch
+        else:
+            self.out_ch = out_ch
+
+        self.reduct_A = ConvModule(in_ch=self.in_ch,out_ch=self.mid_ch,kernel=1)
+        self.reduct_V = ConvModule(in_ch=self.in_ch,out_ch=self.mid_ch,kernel=1)
+        self.MHA_V = MultiHeadedAttention(num_heads=8, d_model=self.mid_ch, dropout=dropout)
+
+        self.Q_sim_conv = ConvModule(1,1,1,mode="conv")
+        self.S_sim_conv = ConvModule(1,1,1,mode="conv")
+
+        self.V_corr = ConvModule(self.mid_ch*2,self.out_ch,3)
+
+
+    def forward(self, main, aux):
+        # main = [QV,SV] RGB anchor, aux = [QA,SA] thermal
+        QV = self.reduct_V(main[0])
+        SV = self.reduct_V(main[1])
+        QA = self.reduct_A(aux[0])
+        SA = self.reduct_A(aux[1])
+
+        sim = cosine_similarity(QV,SV)
+        REQ = self.Q_sim_conv(sim)*QV
+        Q_en_V = self.MHA_V(QA,REQ,REQ)
+
+        REV = self.S_sim_conv(sim)*SV
+        S_en_V = self.MHA_V(SA,REV,REV)
+
+        fused_Trimaps = [self.V_corr(torch.cat([Q_en_V,S_en_V],dim=1))]
+
+        return fused_Trimaps
         
 
