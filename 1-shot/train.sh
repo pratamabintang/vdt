@@ -27,6 +27,13 @@ BACKBONE="${BACKBONE:-resnet50}"
 SIZE="${SIZE:-512}"
 DROP="${DROP:-0.2}"
 
+# ------------------------------- SAM2 encoder ------------------------------
+# Only used when BACKBONE=sam2_hiera_{t,s,b+,l}. Leave SAM2_CONFIG empty to use
+# "<backbone>.yaml" (resolves to the vendored SAM2 config automatically).
+SAM2_CONFIG="${SAM2_CONFIG:-}"   # e.g. sam2_hiera_l.yaml
+SAM2_CKPT="${SAM2_CKPT:-}"       # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
+SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"  # 1 = train wide adapters, 0 = freeze trunk fully
+
 # ------------------------------- optim -------------------------------------
 BSZ="${BSZ:-4}"
 EPISODES="${EPISODES:-0}"        # query episodes per epoch (0 = all positive tiles)
@@ -54,11 +61,19 @@ if [ -n "$RESUME" ]; then RESUME_FLAG="--resume $RESUME"; fi
 LOGPATH_FLAG=""
 if [ -n "$LOGPATH" ]; then LOGPATH_FLAG="--logpath $LOGPATH"; fi
 
+SAM2_FLAGS=""
+if [ -n "$SAM2_CONFIG" ]; then SAM2_FLAGS="$SAM2_FLAGS --sam2-config $SAM2_CONFIG"; fi
+if [ -n "$SAM2_CKPT" ]; then SAM2_FLAGS="$SAM2_FLAGS --sam2-ckpt $SAM2_CKPT"; fi
+SAM2_FLAGS="$SAM2_FLAGS --sam2-adapters $SAM2_ADAPTERS"
+
 echo "[train.sh] train=$TRAIN_ROOT"
 echo "[train.sh] val  =$VAL_ROOT"
 echo "[train.sh] blacklist=$BLACKLIST"
 echo "[train.sh] model=$MODEL backbone=$BACKBONE size=$SIZE bsz=$BSZ episodes=$EPISODES lr=$LR epoch=$EPOCH"
 echo "[train.sh] amp=$AMP dtype=$AMP_DTYPE auxloss=$AUXLOSS"
+if [ "$SAM2_ADAPTERS" != "0" ] || [ -n "$SAM2_CONFIG" ] || [ -n "$SAM2_CKPT" ]; then
+  echo "[train.sh] sam2 config=${SAM2_CONFIG:-<backbone>.yaml} ckpt=${SAM2_CKPT:-none} adapters=$SAM2_ADAPTERS"
+fi
 
 if [ -z "$BLACKLIST" ]; then
   echo "[train.sh] WARNING: BLACKLIST empty (set BLACKLIST or BLACK_LIST_PATH); broken tiles will NOT be skipped." >&2
@@ -79,5 +94,6 @@ python train.py \
   --drop "$DROP" \
   --auxloss "$AUXLOSS" \
   $AMP_FLAG \
+  $SAM2_FLAGS \
   $RESUME_FLAG \
   $LOGPATH_FLAG

@@ -19,7 +19,7 @@ EPOCH="${EPOCH:-20}"
 # Batch size used for every run.
 BSZ="${BSZ:-4}"
 
-echo "[sweep] episodes=$EPISODES_LIST  epoch=$EPOCH  bsz=$BSZ"
+echo "[sweep] episodes=$EPISODES_LIST  epoch=$EPOCH  bsz=$BSZ  backbone=${BACKBONE:-resnet50}"
 
 for E in $EPISODES_LIST; do
   echo ""

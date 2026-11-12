@@ -24,6 +24,13 @@ BACKBONE="${BACKBONE:-resnet50}"
 SIZE="${SIZE:-512}"
 DROP="${DROP:-0.2}"
 
+# ------------------------------- SAM2 encoder ------------------------------
+# Only used when BACKBONE=sam2_hiera_{t,s,b+,l}. Must match the config used in
+# training; SAM2_CKPT is optional here (best_model.pt already holds the weights).
+SAM2_CONFIG="${SAM2_CONFIG:-}"   # e.g. sam2_hiera_l.yaml
+SAM2_CKPT="${SAM2_CKPT:-}"       # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
+SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"
+
 # ------------------------------- run control -------------------------------
 # Directory produced by training that holds best_model.pt.
 LOAD="${LOAD:-}"                 # e.g. logs/_MMDD_HHMMSS_IFCNet.log
@@ -41,6 +48,11 @@ if [ "$AMP" = "1" ]; then AMP_FLAG="--amp --amp-dtype $AMP_DTYPE"; fi
 LOGPATH_FLAG=""
 if [ -n "$LOGPATH" ]; then LOGPATH_FLAG="--logpath $LOGPATH"; fi
 
+SAM2_FLAGS=""
+if [ -n "$SAM2_CONFIG" ]; then SAM2_FLAGS="$SAM2_FLAGS --sam2-config $SAM2_CONFIG"; fi
+if [ -n "$SAM2_CKPT" ]; then SAM2_FLAGS="$SAM2_FLAGS --sam2-ckpt $SAM2_CKPT"; fi
+SAM2_FLAGS="$SAM2_FLAGS --sam2-adapters $SAM2_ADAPTERS"
+
 if [ -z "$LOAD" ]; then
   echo "[test.sh] ERROR: LOAD is empty. Set LOAD=<training log dir with best_model.pt>" >&2
   exit 1
@@ -51,6 +63,9 @@ echo "[test.sh] blacklist=$BLACKLIST"
 echo "[test.sh] load=$LOAD"
 echo "[test.sh] model=$MODEL backbone=$BACKBONE size=$SIZE"
 echo "[test.sh] amp=$AMP dtype=$AMP_DTYPE"
+if [ "$SAM2_ADAPTERS" != "0" ] || [ -n "$SAM2_CONFIG" ] || [ -n "$SAM2_CKPT" ]; then
+  echo "[test.sh] sam2 config=${SAM2_CONFIG:-<backbone>.yaml} ckpt=${SAM2_CKPT:-none} adapters=$SAM2_ADAPTERS"
+fi
 
 if [ -z "$BLACKLIST" ]; then
   echo "[test.sh] WARNING: BLACKLIST empty (set BLACKLIST or BLACK_LIST_PATH); broken tiles will NOT be skipped." >&2
@@ -66,4 +81,5 @@ python test.py \
   --nworker "$NWORKER" \
   --drop "$DROP" \
   $AMP_FLAG \
+  $SAM2_FLAGS \
   $LOGPATH_FLAG

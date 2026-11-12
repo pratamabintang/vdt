@@ -174,7 +174,15 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--epoch', type=int, default=200)
     parser.add_argument('--nworker', type=int, default=2)
-    parser.add_argument('--backbone', type=str, default='resnet50', choices=['vgg16', 'resnet50', 'resnet101'])
+    parser.add_argument('--backbone', type=str, default='resnet50',
+                        choices=['vgg16', 'resnet50', 'resnet101',
+                                 'sam2_hiera_t', 'sam2_hiera_s', 'sam2_hiera_b+', 'sam2_hiera_l'])
+    parser.add_argument('--sam2-config', type=str, default='',
+                        help="SAM2 hydra config (default: '<backbone>.yaml', e.g. sam2_hiera_l.yaml)")
+    parser.add_argument('--sam2-ckpt', type=str, default=None,
+                        help='SAM2 checkpoint (2.0), e.g. sam2_hiera_large.pt')
+    parser.add_argument('--sam2-adapters', type=int, default=1, choices=[0, 1],
+                        help='insert parameter-efficient adapters into the frozen SAM2 trunk')
     parser.add_argument('--model', type=str, default='IFCNet')
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--drop', type=float, default=0.2)
@@ -187,7 +195,10 @@ if __name__ == '__main__':
 
     if args.model == 'IFCNet':
         Logger.initialize(args, training=True, modelname="IFCNet")
-        model = IFCNet(args.backbone, False, dropout=args.drop)
+        model = IFCNet(args.backbone, False, dropout=args.drop,
+                       sam2_config=args.sam2_config or None,
+                       sam2_ckpt=args.sam2_ckpt,
+                       sam2_adapters=bool(args.sam2_adapters))
     else:
         raise KeyError(f"model version {args.model} not defined")
 

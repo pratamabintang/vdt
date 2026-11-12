@@ -1,4 +1,5 @@
 r""" Hypercorrelation Squeeze Network """
+import contextlib
 from functools import reduce
 from operator import add
 
@@ -9,7 +10,7 @@ from torchvision.models import resnet
 from torchvision.models import vgg
 
 from .Trifuse import *
-from .base.feature import extract_feat_vgg, extract_feat_res
+from .base.feature import extract_feat_vgg, extract_feat_res, extract_feat_sam2
 from .base.correlation import Correlation
 from .losses import structure_loss
 
@@ -17,11 +18,15 @@ import numpy as np
 
 
 class IFCNet(nn.Module):
-    def __init__(self, backbone, use_original_imgsize, dropout=0.0, vis = False):
+    def __init__(self, backbone, use_original_imgsize, dropout=0.0, vis = False,
+                 sam2_config=None, sam2_ckpt=None, sam2_adapters=True):
         super().__init__()
         # add supervision
         self.backbone_type = backbone
         self.use_original_imgsize = use_original_imgsize
+        # resnet/vgg are fully frozen and wrapped in torch.no_grad(); SAM2 keeps a
+        # gradient path through its adapters (trunk params are frozen).
+        self.frozen_grad_backbone = True
         if backbone == 'vgg16':
             self.backbone = vgg.vgg16(pretrained=True)
             self.feat_ids = [17, 19, 21, 24, 26, 28, 30]
@@ -40,6 +45,16 @@ class IFCNet(nn.Module):
             self.extract_feats = extract_feat_res
             self.nbottlenecks = [3, 4, 23, 3]
             self.multilevel_ch = [512,1024,2048] # l2,l3,l4
+        elif backbone in ('sam2_hiera_t', 'sam2_hiera_s', 'sam2_hiera_b+', 'sam2_hiera_l'):
+            from .sam2_encoder import SAM2Encoder
+            cfg = sam2_config or (backbone + '.yaml')
+            self.backbone = SAM2Encoder(cfg, sam2_ckpt, adapters=sam2_adapters)
+            # one feature per level (x2, x3, x4) -> 3 levels fine->coarse
+            self.feat_ids = [0, 1, 2]
+            self.extract_feats = extract_feat_sam2
+            self.nbottlenecks = [1, 1, 1, 1]
+            self.multilevel_ch = list(self.backbone.out_channels)  # [x2,x3,x4]
+            self.frozen_grad_backbone = not bool(sam2_adapters)
         else:
             raise Exception('Unavailable backbone: %s' % backbone)
 
@@ -81,7 +96,8 @@ class IFCNet(nn.Module):
         return src
 
     def forward(self, query_img, query_img_th, support_img, support_img_th, support_mask):
-        with torch.no_grad():
+        feat_ctx = torch.no_grad() if self.frozen_grad_backbone else contextlib.nullcontext()
+        with feat_ctx:
             # only the output of last layer in each level is used
             query_feats = self.extract_feats(query_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
             support_feats = self.extract_feats(support_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
