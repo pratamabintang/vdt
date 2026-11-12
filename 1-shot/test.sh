@@ -28,8 +28,18 @@ DROP="${DROP:-0.2}"
 # Only used when BACKBONE=sam2_hiera_{t,s,b+,l}. Must match the config used in
 # training; SAM2_CKPT is optional here (best_model.pt already holds the weights).
 SAM2_CONFIG="${SAM2_CONFIG:-}"   # e.g. sam2_hiera_l.yaml
-SAM2_CKPT="${SAM2_CKPT:-}"       # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
+# Checkpoint path: SAM2_CKPT wins; else HIERA_PATH; else HIERA_LARGE_PATH; else default.
+# Not strictly needed at test time (best_model.pt already holds the weights).
+HIERA_PATH="${HIERA_PATH:-${HIERA_LARGE_PATH:-/content/drive/MyDrive/project/checkpoints/sam2_hiera_large.pt}}"
+SAM2_CKPT="${SAM2_CKPT:-$HIERA_PATH}"   # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
 SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"
+
+# At test time the trunk weights come from best_model.pt, so a missing checkpoint
+# is not fatal: drop the flag rather than fail on the FileNotFoundError check.
+if [ -n "$SAM2_CKPT" ] && [ ! -f "$SAM2_CKPT" ]; then
+  echo "[test.sh] note: SAM2_CKPT not found ($SAM2_CKPT); loading weights from best_model.pt only." >&2
+  SAM2_CKPT=""
+fi
 
 # ------------------------------- run control -------------------------------
 # Directory produced by training that holds best_model.pt.
