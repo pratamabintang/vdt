@@ -1,0 +1,25 @@
+# Few-shot landslide segmentation (1-shot, RGB + DTM)
+# Tested stack: Python 3.10/3.11 + PyTorch 2.x (CUDA on Colab / L4).
+
+# --- deep learning ---------------------------------------------------------
+# On Colab, torch/torchvision come preinstalled as a CUDA build. The ">=" specs
+# below are already satisfied there, so pip will NOT replace them with CPU wheels.
+# To force a specific build locally, install torch first, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0
+torchvision>=0.15
+
+# --- numerical / IO --------------------------------------------------------
+numpy>=1.24
+Pillow>=9.5
+opencv-python>=4.8
+tifffile>=2023.7.10
+
+# --- logging / progress ----------------------------------------------------
+tensorboardX>=2.6
+tqdm>=4.66
+
+# --- optional --------------------------------------------------------------
+# rasterio is NOT required (DTM read falls back PIL -> cv2 -> tifffile).
+# Add it only if you prefer rasterio for GeoTIFF:
+# rasterio>=1.3
