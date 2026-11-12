@@ -66,16 +66,21 @@ class Logger:
 
     @classmethod
     def log_params(cls, model):
+        r"""Report frozen-backbone / learnable / total parameter counts.
+
+        Counts by ``requires_grad`` (not by ``state_dict``), so a frozen SAM2
+        trunk is reported as backbone instead of "learnable".
+        """
         backbone_param = 0
         learner_param = 0
-        for k in model.state_dict().keys():
-            n_param = model.state_dict()[k].view(-1).size(0)
-            if k.split('.')[0] in 'backbone':
-                if k.split('.')[1] in ['classifier', 'fc']:  # as fc layers are not used in HSNet
-                    continue
-                backbone_param += n_param
-            else:
-                learner_param += n_param
-        Logger.info('Backbone # param.: %d' % backbone_param)
+        total_param = 0
+        for name, param in model.named_parameters():
+            n = param.numel()
+            total_param += n
+            if param.requires_grad:
+                learner_param += n
+            elif name.startswith('backbone'):
+                backbone_param += n
+        Logger.info('Backbone # param. (frozen): %d' % backbone_param)
         Logger.info('Learnable # param.: %d' % learner_param)
-        Logger.info('Total # param.: %d' % (backbone_param + learner_param))
+        Logger.info('Total # param.: %d' % total_param)

@@ -10,8 +10,15 @@ class Evaluator:
 
     @classmethod
     def classify_prediction(cls, pred_mask, target):
+        r"""Per-class pixel statistics.
+
+        Returns ``(area_inter, area_union, area_pred, area_gt)``, each ``[2, B]``
+        (row 0 = background, row 1 = foreground).  ``area_pred`` / ``area_gt`` are
+        returned as well so the meter can report precision/recall, which makes a
+        collapsed (all-background) model obvious.
+        """
         gt_mask = target
-        area_inter, area_pred, area_gt = [],  [], []
+        area_inter, area_pred, area_gt = [], [], []
         for _pred_mask, _gt_mask in zip(pred_mask, gt_mask):
             _inter = _pred_mask[_pred_mask == _gt_mask]
             if _inter.size(0) == 0:  # as torch.histc returns error if it gets empty tensor (pytorch 1.5.1)
@@ -26,4 +33,4 @@ class Evaluator:
         area_gt = torch.stack(area_gt).t()
         area_union = area_pred + area_gt - area_inter
 
-        return area_inter, area_union
+        return area_inter, area_union, area_pred, area_gt

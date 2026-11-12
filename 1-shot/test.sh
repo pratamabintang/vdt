@@ -51,6 +51,12 @@ LOGPATH="${LOGPATH:-}"           # custom log folder name (empty -> timestamped)
 AMP="${AMP:-1}"                  # 1 = enable mixed precision, 0 = full fp32
 AMP_DTYPE="${AMP_DTYPE:-bf16}"   # bf16 | fp16
 
+# ------------------------------- loss / device -----------------------------
+# Must match the training run so the reported Avg L is comparable.
+LOSS="${LOSS:-tversky}"          # tversky | dice | focal | bce | structure (legacy)
+POS_WEIGHT="${POS_WEIGHT:-0}"    # BCE pos_weight for the rare fg (0 = disabled)
+DEVICE="${DEVICE:-auto}"         # auto | cuda:0 | cpu
+
 # ------------------------------- build flags -------------------------------
 AMP_FLAG=""
 if [ "$AMP" = "1" ]; then AMP_FLAG="--amp --amp-dtype $AMP_DTYPE"; fi
@@ -72,7 +78,7 @@ echo "[test.sh] test=$TEST_ROOT"
 echo "[test.sh] blacklist=$BLACKLIST"
 echo "[test.sh] load=$LOAD"
 echo "[test.sh] model=$MODEL backbone=$BACKBONE size=$SIZE"
-echo "[test.sh] amp=$AMP dtype=$AMP_DTYPE"
+echo "[test.sh] amp=$AMP dtype=$AMP_DTYPE loss=$LOSS pos_weight=$POS_WEIGHT device=$DEVICE"
 if [ "$SAM2_ADAPTERS" != "0" ] || [ -n "$SAM2_CONFIG" ] || [ -n "$SAM2_CKPT" ]; then
   echo "[test.sh] sam2 config=${SAM2_CONFIG:-<backbone>.yaml} ckpt=${SAM2_CKPT:-none} adapters=$SAM2_ADAPTERS"
 fi
@@ -90,6 +96,9 @@ python test.py \
   --size "$SIZE" \
   --nworker "$NWORKER" \
   --drop "$DROP" \
+  --loss "$LOSS" \
+  --pos-weight "$POS_WEIGHT" \
+  --device "$DEVICE" \
   $AMP_FLAG \
   $SAM2_FLAGS \
   $LOGPATH_FLAG

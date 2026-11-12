@@ -9,11 +9,24 @@ import torch.nn.functional as F
 from PIL import Image
 
 from model.mymodel import IFCNet
+from model.losses import LOSS_KINDS
 from common.logger import Logger
 from common.evaluation import Evaluator
 from common.metrics import BinaryMeter
 from common import utils
 from data.landslide import LandslideFSS
+
+
+def unwrap(model):
+    r"""Return the underlying module whether or not DataParallel wrapped it."""
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def resolve_device(name):
+    r"""'auto' -> cuda when available, otherwise cpu."""
+    if name == 'auto':
+        name = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    return torch.device(name)
 
 
 def save_visual(ori_rgb, q_mask, pred_mask, name, out_dir="./visual_maps"):
@@ -34,56 +47,63 @@ def save_visual(ori_rgb, q_mask, pred_mask, name, out_dir="./visual_maps"):
     Image.fromarray(overlay(pred)).save(os.path.join(out_dir, name + '_query_pred.png'))
 
 
-def test(model, dataloader, amp=False, amp_dtype=torch.bfloat16):
+def test(model, dataloader, loss_kind='tversky', pos_weight=None,
+         amp=False, amp_dtype=torch.bfloat16, device=None):
     r"""Evaluate on the landslide test split."""
     meter = BinaryMeter()
-    use_amp = amp and torch.cuda.is_available()
+    net = unwrap(model)
+    if device is None:
+        device = next(model.parameters()).device
+    use_amp = amp and device.type == 'cuda'
 
     for query_rgb, query_dtm, query_mask, support_rgb, support_dtm, support_mask, subcls in dataloader:
-        support_mask = support_mask.squeeze(1)
         query_mask = query_mask.squeeze(1)
-        query_rgb = query_rgb.cuda(non_blocking=True)
-        query_dtm = query_dtm.cuda(non_blocking=True)
-        support_rgb = support_rgb.cuda(non_blocking=True)
-        support_dtm = support_dtm.cuda(non_blocking=True)
-        support_mask = support_mask.cuda(non_blocking=True)
-        query_mask = query_mask.cuda(non_blocking=True)
+        query_rgb = query_rgb.to(device, non_blocking=True)
+        query_dtm = query_dtm.to(device, non_blocking=True)
+        support_rgb = support_rgb.to(device, non_blocking=True)
+        support_dtm = support_dtm.to(device, non_blocking=True)
+        support_mask = support_mask.squeeze(1).to(device, non_blocking=True)
+        query_mask = query_mask.to(device, non_blocking=True)
 
-        with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=use_amp):
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logit_masks = model(query_rgb, query_dtm, support_rgb, support_dtm, support_mask)
             if not isinstance(logit_masks, list):
                 logit_masks = [logit_masks]
-            loss = model.module.compute_objective(logit_masks, query_mask)
+            loss = net.compute_objective(logit_masks, query_mask,
+                                         loss_kind=loss_kind, pos_weight=pos_weight)
 
-        pred_mask = logit_masks[-1].float().argmax(dim=1)
+        pred_mask = net.predict_mask(logit_masks[-1], query_mask.shape[1:])
 
-        area_inter, area_union = Evaluator.classify_prediction(pred_mask, query_mask)
-        meter.update(area_inter, area_union, subcls, loss)
+        area_inter, area_union, area_pred, area_gt = Evaluator.classify_prediction(pred_mask, query_mask)
+        meter.update(area_inter, area_union, subcls, loss, pred_b=area_pred, gt_b=area_gt)
 
     meter.write_result('Test', 0)
     miou, fb_iou, _ = meter.compute_iou()
     dice, _, _ = meter.compute_dice()
-    return miou, fb_iou, dice
+    precision, recall = meter.compute_precision_recall()
+    return miou, fb_iou, dice, precision, recall, meter
 
 
 def main(args, model):
     utils.fix_randseed(0)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    Logger.info('# available GPUs: %d' % torch.cuda.device_count())
+    device = resolve_device(args.device)
+    Logger.info('# device: %s | available GPUs: %d' % (device, torch.cuda.device_count()))
 
     model.to(device)
     if args.load == '':
         raise Exception('Pretrained model not specified.')
     model.load_state_dict(torch.load(os.path.join(args.load, "best_model.pt"), map_location=device))
-    model = nn.DataParallel(model)
+    if device.type == 'cuda':
+        model = nn.DataParallel(model)
     model.eval()
 
     Evaluator.initialize()
 
-    use_amp = args.amp and torch.cuda.is_available()
+    use_amp = args.amp and device.type == 'cuda'
     amp_dtype = torch.bfloat16 if args.amp_dtype == 'bf16' else torch.float16
     if use_amp:
         Logger.info('AMP enabled: dtype=%s' % str(amp_dtype).replace('torch.', ''))
+    Logger.info('Loss: %s (pos_weight=%s)' % (args.loss, args.pos_weight or 'none'))
 
     dataloader_test = LandslideFSS(
         data_dir=args.testdata,
@@ -98,9 +118,15 @@ def main(args, model):
     )
 
     with torch.no_grad():
-        test_miou, test_fb_iou, test_dice = test(model, test_loader, amp=use_amp, amp_dtype=amp_dtype)
-    Logger.info('IoU(landslide): %5.2f \t FB-IoU: %5.2f \t Dice(landslide): %5.2f' %
-                (test_miou.item(), test_fb_iou.item(), test_dice.item()))
+        test_miou, test_fb_iou, test_dice, prec, rec, meter = test(
+            model, test_loader, loss_kind=args.loss, pos_weight=args.pos_weight or None,
+            amp=use_amp, amp_dtype=amp_dtype, device=device)
+    Logger.info('IoU(landslide): %5.2f \t FB-IoU: %5.2f \t Dice(landslide): %5.2f \t '
+                'Prec(landslide): %5.2f \t Rec(landslide): %5.2f' %
+                (test_miou.item(), test_fb_iou.item(), test_dice.item(), prec.item(), rec.item()))
+    if meter.is_collapsed():
+        Logger.info('[WARN] collapse: the model never predicts landslide (recall=0). '
+                    'Check the training run (LR too low / epochs too few / loss).')
     Logger.info('==================== Finished Testing ====================')
 
 
@@ -125,6 +151,12 @@ if __name__ == '__main__':
                         help='insert parameter-efficient adapters into the frozen SAM2 trunk')
     parser.add_argument('--model', type=str, default='IFCNet')
     parser.add_argument('--drop', type=float, default=0.2)
+    parser.add_argument('--loss', type=str, default='tversky', choices=list(LOSS_KINDS),
+                        help='loss used only to report Avg L (must match training for comparability)')
+    parser.add_argument('--pos-weight', type=float, default=0.0,
+                        help='BCE pos_weight for the rare foreground (0 = disabled)')
+    parser.add_argument('--device', type=str, default='auto',
+                        help="'auto' (cuda if available else cpu), 'cuda:0' or 'cpu'")
     parser.add_argument('--amp', action='store_true', help='enable automatic mixed precision (AMP)')
     parser.add_argument('--amp-dtype', type=str, default='bf16', choices=['bf16', 'fp16'],
                         help="AMP dtype: 'bf16' (recommended on L4/Ada) or 'fp16'")
@@ -132,7 +164,8 @@ if __name__ == '__main__':
 
     if args.model == 'IFCNet':
         Logger.initialize(args, training=True, modelname="IFCNet")
-        model = IFCNet(args.backbone, False, dropout=args.drop,
+        # use_original_imgsize=True -> native logits (upsampled only for metrics)
+        model = IFCNet(args.backbone, True, dropout=args.drop,
                        sam2_config=args.sam2_config or None,
                        sam2_ckpt=args.sam2_ckpt,
                        sam2_adapters=bool(args.sam2_adapters))

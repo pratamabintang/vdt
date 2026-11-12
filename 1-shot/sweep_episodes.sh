@@ -18,8 +18,20 @@ EPISODES_LIST="${EPISODES_LIST:-0 10 100}"
 EPOCH="${EPOCH:-20}"
 # Batch size used for every run.
 BSZ="${BSZ:-4}"
+LR="${LR:-3e-4}"
+LOSS="${LOSS:-tversky}"
 
-echo "[sweep] episodes=$EPISODES_LIST  epoch=$EPOCH  bsz=$BSZ  backbone=${BACKBONE:-resnet50}"
+echo "[sweep] episodes=$EPISODES_LIST  epoch=$EPOCH  bsz=$BSZ  lr=$LR  loss=$LOSS  backbone=${BACKBONE:-resnet50}"
+
+# An episode budget below the batch size yields 0 batches -> the run would train
+# nothing (and silently report a random model). Fail fast instead.
+for E in $EPISODES_LIST; do
+  if [ "$E" != "0" ] && [ "$E" -lt "$BSZ" ]; then
+    echo "[sweep] ERROR: EPISODES=$E < BSZ=$BSZ -> 0 batches/epoch (no training)." >&2
+    echo "[sweep]        Lower BSZ (e.g. BSZ=$E) or raise the episode budget." >&2
+    exit 1
+  fi
+done
 
 for E in $EPISODES_LIST; do
   echo ""
@@ -29,6 +41,8 @@ for E in $EPISODES_LIST; do
   EPISODES="$E" \
   EPOCH="$EPOCH" \
   BSZ="$BSZ" \
+  LR="$LR" \
+  LOSS="$LOSS" \
   LOGPATH="ep${E}" \
   bash train.sh
 done

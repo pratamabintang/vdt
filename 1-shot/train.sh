@@ -38,11 +38,17 @@ SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"  # 1 = train wide adapters, 0 = freeze trunk
 
 # ------------------------------- optim -------------------------------------
 BSZ="${BSZ:-4}"
-EPISODES="${EPISODES:-0}"        # query episodes per epoch (0 = all positive tiles)
-LR="${LR:-1e-4}"
+EPISODES="${EPISODES:-0}"        # query episodes per epoch (0 = all positive tiles; must be 0 or >= BSZ)
+LR="${LR:-3e-4}"                 # frozen backbone -> >=3e-4 recommended
 EPOCH="${EPOCH:-200}"
 NWORKER="${NWORKER:-2}"
 AUXLOSS="${AUXLOSS:-0.4}"        # weight of coarse-scale losses in deep supervision
+
+# ------------------------------- loss / device -----------------------------
+# Landslide is ~2% positive: tversky (default) / dice / focal beat plain BCE.
+LOSS="${LOSS:-tversky}"          # tversky | dice | focal | bce | structure (legacy)
+POS_WEIGHT="${POS_WEIGHT:-0}"    # BCE pos_weight for the rare fg (0 = disabled; 5-20 helps)
+DEVICE="${DEVICE:-auto}"         # auto | cuda:0 | cpu  (cpu allows a smoke test)
 
 # ------------------------------- AMP ---------------------------------------
 # L4 / Ada: keep AMP=1 AMP_DTYPE=bf16 (no GradScaler needed).
@@ -72,7 +78,7 @@ echo "[train.sh] train=$TRAIN_ROOT"
 echo "[train.sh] val  =$VAL_ROOT"
 echo "[train.sh] blacklist=$BLACKLIST"
 echo "[train.sh] model=$MODEL backbone=$BACKBONE size=$SIZE bsz=$BSZ episodes=$EPISODES lr=$LR epoch=$EPOCH"
-echo "[train.sh] amp=$AMP dtype=$AMP_DTYPE auxloss=$AUXLOSS"
+echo "[train.sh] amp=$AMP dtype=$AMP_DTYPE auxloss=$AUXLOSS loss=$LOSS pos_weight=$POS_WEIGHT device=$DEVICE"
 if [ "$SAM2_ADAPTERS" != "0" ] || [ -n "$SAM2_CONFIG" ] || [ -n "$SAM2_CKPT" ]; then
   echo "[train.sh] sam2 config=${SAM2_CONFIG:-<backbone>.yaml} ckpt=${SAM2_CKPT:-none} adapters=$SAM2_ADAPTERS"
 fi
@@ -95,6 +101,9 @@ python train.py \
   --nworker "$NWORKER" \
   --drop "$DROP" \
   --auxloss "$AUXLOSS" \
+  --loss "$LOSS" \
+  --pos-weight "$POS_WEIGHT" \
+  --device "$DEVICE" \
   $AMP_FLAG \
   $SAM2_FLAGS \
   $RESUME_FLAG \
