@@ -44,3 +44,13 @@ def extract_feat_res(img, backbone, feat_ids, bottleneck_ids, lids):
         feat = backbone.__getattr__('layer%d' % lid)[bid].relu.forward(feat)
 
     return feats
+
+
+def extract_feat_sam2(img, backbone, feat_ids=None, bottleneck_ids=None, lids=None):
+    r""" Extract features from the SAM2 Hiera encoder.
+
+    The encoder already returns three maps in fine -> coarse order (x2, x3, x4);
+    the resnet/vgg specific ``feat_ids`` / ``bottleneck_ids`` / ``lids`` args are
+    accepted only for interface compatibility.
+    """
+    return backbone(img)

@@ -1,4 +1,5 @@
 r""" Hypercorrelation Squeeze Network """
+import contextlib
 from functools import reduce
 from operator import add
 
@@ -9,19 +10,29 @@ from torchvision.models import resnet
 from torchvision.models import vgg
 
 from .Trifuse import *
-from .base.feature import extract_feat_vgg, extract_feat_res
+from .base.feature import extract_feat_vgg, extract_feat_res, extract_feat_sam2
 from .base.correlation import Correlation
-from .losses import structure_loss
+from .losses import segmentation_loss
 
 import numpy as np
 
 
 class IFCNet(nn.Module):
-    def __init__(self, backbone, use_original_imgsize, dropout=0.0, vis = False):
+    def __init__(self, backbone, use_original_imgsize, dropout=0.0, vis = False,
+                 sam2_config=None, sam2_ckpt=None, sam2_adapters=True):
         super().__init__()
         # add supervision
         self.backbone_type = backbone
+        # True  -> forward returns logits at their native resolution (3 scales,
+        #          stride 8/16/32); the loss then runs per-scale and the caller
+        #          upsamples only the final map for the metrics.  (train/test use
+        #          this.)
+        # False -> legacy: every scale is bilinearly upsampled to the input size
+        #          inside forward.
         self.use_original_imgsize = use_original_imgsize
+        # resnet/vgg are fully frozen and wrapped in torch.no_grad(); SAM2 keeps a
+        # gradient path through its adapters (trunk params are frozen).
+        self.frozen_grad_backbone = True
         if backbone == 'vgg16':
             self.backbone = vgg.vgg16(pretrained=True)
             self.feat_ids = [17, 19, 21, 24, 26, 28, 30]
@@ -40,6 +51,16 @@ class IFCNet(nn.Module):
             self.extract_feats = extract_feat_res
             self.nbottlenecks = [3, 4, 23, 3]
             self.multilevel_ch = [512,1024,2048] # l2,l3,l4
+        elif backbone in ('sam2_hiera_t', 'sam2_hiera_s', 'sam2_hiera_b+', 'sam2_hiera_l'):
+            from .sam2_encoder import SAM2Encoder
+            cfg = sam2_config or (backbone + '.yaml')
+            self.backbone = SAM2Encoder(cfg, sam2_ckpt, adapters=sam2_adapters)
+            # one feature per level (x2, x3, x4) -> 3 levels fine->coarse
+            self.feat_ids = [0, 1, 2]
+            self.extract_feats = extract_feat_sam2
+            self.nbottlenecks = [1, 1, 1, 1]
+            self.multilevel_ch = list(self.backbone.out_channels)  # [x2,x3,x4]
+            self.frozen_grad_backbone = not bool(sam2_adapters)
         else:
             raise Exception('Unavailable backbone: %s' % backbone)
 
@@ -76,12 +97,13 @@ class IFCNet(nn.Module):
         
 
     def _upsample_like(self, src, tar):
-        src = F.upsample(src, size=tar.shape[2:], mode='bilinear')
+        src = F.interpolate(src, size=tar.shape[2:], mode='bilinear', align_corners=True)
 
         return src
 
     def forward(self, query_img, query_img_th, support_img, support_img_th, support_mask):
-        with torch.no_grad():
+        feat_ctx = torch.no_grad() if self.frozen_grad_backbone else contextlib.nullcontext()
+        with feat_ctx:
             # only the output of last layer in each level is used
             query_feats = self.extract_feats(query_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
             support_feats = self.extract_feats(support_img, self.backbone, self.feat_ids, self.bottleneck_ids, self.lids)
@@ -153,25 +175,47 @@ class IFCNet(nn.Module):
         else:
             return logit_masks
 
+    def predict_mask(self, logit_mask, size):
+        r"""argmax over the 2 logit channels, upsampled to ``size`` (H, W)."""
+        size = tuple(size)
+        if logit_mask.shape[2:] != size:
+            logit_mask = F.interpolate(logit_mask, size=size, mode='bilinear', align_corners=True)
+        return logit_mask.float().argmax(dim=1)
+
     def mask_feature(self, features, support_mask):
         for idx, feature in enumerate(features):
             mask = F.interpolate(support_mask.unsqueeze(1).float(), feature.size()[2:], mode='bilinear', align_corners=True)
             features[idx] = features[idx] * mask
         return features
 
-    def compute_objective(self, logit_masks, gt_mask, auxloss_weight=0.4):
-        # structure-aware loss: weighted BCE + weighted IoU on the foreground logits
-        # deep supervision: finest scale weight 1.0, auxiliary scales weight auxloss_weight
-        if isinstance(logit_masks,list):
-            loss = 0 
-            last = len(logit_masks) - 1
-            for i, logit_mask in enumerate(logit_masks):
-                w = 1.0 if i == last else auxloss_weight
-                loss = loss + w * structure_loss(logit_mask, gt_mask)
+    def compute_objective(self, logit_masks, gt_mask, auxloss_weight=0.4,
+                          loss_kind='tversky', pos_weight=None):
+        r"""Deep-supervision loss.
 
-        else:      
-            loss = structure_loss(logit_masks, gt_mask)
+        Every scale is scored at its **native** resolution (the ground truth is
+        down-sampled to the logit size) so the coarse 16x16 / 32x32 maps are not
+        diluted by the 98% background of a full 512x512 grid.
 
+        Deep supervision: finest scale weight 1.0, auxiliary scales weight
+        ``auxloss_weight``.  ``loss_kind`` selects the foreground-aware region
+        loss (see ``model.losses``): ``tversky`` (default), ``dice``, ``focal``,
+        ``bce`` or the legacy ``structure``.
+        """
+        if not isinstance(logit_masks, list):
+            logit_masks = [logit_masks]
+
+        gt = gt_mask.unsqueeze(1) if gt_mask.dim() == 3 else gt_mask
+        gt = gt.float()
+
+        last = len(logit_masks) - 1
+        loss = 0
+        for i, logit_mask in enumerate(logit_masks):
+            w = 1.0 if i == last else auxloss_weight
+            scale_gt = gt
+            if scale_gt.shape[2:] != logit_mask.shape[2:]:
+                scale_gt = F.interpolate(scale_gt, size=logit_mask.shape[2:], mode='nearest')
+            loss = loss + w * segmentation_loss(logit_mask, scale_gt, kind=loss_kind,
+                                                pos_weight=pos_weight)
         return loss
 
     def train_mode(self):
