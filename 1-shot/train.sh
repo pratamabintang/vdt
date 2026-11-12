@@ -31,7 +31,9 @@ DROP="${DROP:-0.2}"
 # Only used when BACKBONE=sam2_hiera_{t,s,b+,l}. Leave SAM2_CONFIG empty to use
 # "<backbone>.yaml" (resolves to the vendored SAM2 config automatically).
 SAM2_CONFIG="${SAM2_CONFIG:-}"   # e.g. sam2_hiera_l.yaml
-SAM2_CKPT="${SAM2_CKPT:-}"       # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
+# Checkpoint path: SAM2_CKPT wins; else HIERA_PATH; else HIERA_LARGE_PATH; else default.
+HIERA_PATH="${HIERA_PATH:-${HIERA_LARGE_PATH:-/content/drive/MyDrive/project/checkpoints/sam2_hiera_large.pt}}"
+SAM2_CKPT="${SAM2_CKPT:-$HIERA_PATH}"   # e.g. /content/.../sam2_hiera_large.pt (SAM2 v2.0)
 SAM2_ADAPTERS="${SAM2_ADAPTERS:-1}"  # 1 = train wide adapters, 0 = freeze trunk fully
 
 # ------------------------------- optim -------------------------------------
